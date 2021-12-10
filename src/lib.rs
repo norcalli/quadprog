@@ -1,7 +1,7 @@
 #![allow(non_snake_case)]
 
 pub use anyhow::Error;
-use anyhow::{ensure, Result};
+use anyhow::{bail, ensure, Result};
 pub use ndarray::prelude::*;
 pub use ndarray_linalg::cholesky::*;
 use std::convert::TryInto;
@@ -32,7 +32,7 @@ pub fn solve_quadprog(
     ensure!(CI.nrows() == n);
     ensure!(ce0.len() == p);
     ensure!(ci0.len() == m);
-    ensure!(x.len() == m);
+    ensure!(x.len() == n);
     // let mut x: Vector = Vector::zeros(n);
 
     let mut R = Matrix::zeros((n, n));
@@ -68,7 +68,8 @@ pub fn solve_quadprog(
     let mut A_old = IVector::zeros(m + p);
     let mut iai = IVector::zeros(m + p);
     let mut iq: usize;
-    let mut iter: usize = 0;
+    // TODO cap upper limit of iterations?
+    // let mut iter: usize = 0;
     let mut iaexcl = BVector::default(m + p);
 
     /*
@@ -79,7 +80,10 @@ pub fn solve_quadprog(
     let c1: f64 = G.diag().sum();
     /* decompose the matrix G in the form L^T L */
     // TODO it says L in the comment, but the function uses the upper triangle.
-    G.cholesky_inplace(UPLO::Upper)?;
+
+    cholesky_decomposition(&mut G)?;
+    // G.cholesky_inplace(UPLO::Upper)?;
+
     /* initialize the matrix R */
     let mut R_norm = 1.0; /* this variable will hold the norm of the matrix R */
 
@@ -147,7 +151,7 @@ pub fn solve_quadprog(
 
         if !add_constraint(&mut R, &mut J, &mut d, &mut iq, &mut R_norm) {
             // Equality constraints are linearly dependent
-            anyhow::bail!("Constraints are linearly dependent");
+            bail!("Constraints are linearly dependent");
             // return f_value;
         }
     }
@@ -160,7 +164,7 @@ pub fn solve_quadprog(
 
     let mut ip: usize; // this is the index of the constraint to be added to the active set
     'l1: loop {
-        iter += 1;
+        // iter += 1;
         /* step 1: choose a violated constraint */
         for i in (p)..(iq) {
             ip = A[i].try_into()?;
@@ -519,7 +523,7 @@ fn delete_constraint(
     }
 
     if !found {
-        anyhow::bail!(
+        bail!(
             "Attempt to delete non existing constraint, constraint: {:?}",
             l
         );
@@ -584,12 +588,29 @@ fn delete_constraint(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-        assert_eq!(2 + 2, 4);
+fn cholesky_decomposition(A: &mut Matrix) -> Result<()> {
+    let n = A.nrows();
+
+    for i in (0)..(n) {
+        for j in (i)..(n) {
+            let mut sum: f64 = A[(i, j)];
+            for k in (0..i).rev() {
+                sum -= A[(i, k)] * A[(j, k)];
+            }
+            if i == j {
+                if sum <= 0.0 {
+                    bail!("Error in cholesky decomposition\nsum: {}\nA: {:?}", sum, A);
+                }
+                A[(i, i)] = (sum).sqrt();
+            } else {
+                A[(j, i)] = sum / A[(i, i)];
+            }
+        }
+        for k in (i + 1)..(n) {
+            A[(i, k)] = A[(k, i)];
+        }
     }
+    Ok(())
 }
 
 /*
@@ -599,3 +620,167 @@ mod tests {
 %s/\[\([^\]]\+\)\]\[\([^\]]\+\)\]/[(\1, \2)]/g
 %s/Vector<double> \(\(\w\+\)(\([^)]\+\)),\?\s*;\?\)\+/let \1 = Vector::zeros(\2);/g
 */
+
+#[cfg(test)]
+mod tests {
+    use approx::{assert_abs_diff_eq, assert_ulps_eq};
+    use ndarray::{array, Array, Array2};
+
+    use super::*;
+
+    // #[test]
+    // fn cholesky_decom_is_legit() -> Result<()> {
+    //     #[rustfmt::skip]
+    //     let g = array![
+    //         [4.0, -2.0],
+    //         [-2.0, 4.0],
+    //     ];
+    //     let mut manual = g.clone();
+    //     let mut linalg = g;
+    //     cholesky_decomposition(&mut manual)?;
+    //     linalg.cholesky_inplace(UPLO::Upper)?;
+    //     assert_eq!(manual, linalg);
+    //     Ok(())
+    // }
+
+    #[test]
+    fn quadprogpp_demo() -> Result<()> {
+        #[rustfmt::skip]
+        let g = array![
+            [4.0, -2.0],
+            [-2.0, 4.0],
+        ];
+        let g0 = array![6.0, 0.0];
+        #[rustfmt::skip]
+        let ce = array![
+            [1.0],
+            [1.0],
+        ];
+        let ce0 = array![-3.0];
+        #[rustfmt::skip]
+        let ci = array![
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 1.0],
+        ];
+        let ci0 = array![0.0, -2.0, 0.0];
+        let mut x = Vector::zeros(g.ncols());
+        let best = solve_quadprog(
+            g,
+            g0,
+            ce,
+            ce0,
+            ci,
+            ci0,
+            &mut x
+        )?;
+        assert_ulps_eq!(best, 12.0);
+        assert_ulps_eq!(x[0], 1.0);
+        assert_ulps_eq!(x[1], 2.0);
+        Ok(())
+    }
+
+    #[test]
+    fn eiquadprog_demo() {
+        #[rustfmt::skip]
+        let g = array![
+            [2.1, 0.0, 1.0],
+            [1.5, 2.2, 0.0],
+            [1.2, 1.3, 3.1],
+        ];
+        let g0 = array![6.0, 1.0, 1.0];
+        let ce = array![[1.0], [2.0], [-1.0]];
+        let ce0 = array![-4.0];
+        #[rustfmt::skip]
+        let ci = array![
+            [1.0, 0.0, 0.0, -1.0],
+            [0.0, 1.0, 0.0, -1.0],
+            [0.0, 0.0, 1.0,  0.0]
+        ];
+        let ci0 = array![0.0, 0.0, 0.0, 10.0];
+        let mut x = Vector::zeros(g.ncols());
+        let best = solve_quadprog(
+            g,
+            g0,
+            ce,
+            ce0,
+            ci,
+            ci0,
+            &mut x
+        ).unwrap();
+        assert_ulps_eq!(best, 6.4);
+        assert_ulps_eq!(x[0], 0.0);
+        assert_ulps_eq!(x[1], 2.0);
+        assert_ulps_eq!(x[2], 0.0);
+    }
+
+    // Problem 0 from hmatrix-quadpropp
+    #[test]
+    fn hmatrix_quadprogpp_problem0() -> Result<()> {
+        #[rustfmt::skip]
+        let g = array![
+            [4.0, 0.0],
+            [0.0, 2.0],
+        ];
+        let g0 = array![-4.0, -8.0];
+        #[rustfmt::skip]
+        let ci = array![
+            [1.0, 0.0, -1.0],
+            [0.0, 1.0, -2.0],
+        ];
+        let ci0 = array![0.0, 0.0, 2.0];
+        let ce0 = Vector::zeros(0);
+        let ce = Matrix::zeros((g.nrows(), 0));
+        let mut x = Vector::zeros(g.ncols());
+        let _best = solve_quadprog(
+            g,
+            g0,
+            ce,
+            ce0,
+            ci,
+            ci0,
+            &mut x
+        )?;
+        let answer = x;
+        assert_abs_diff_eq!(answer[0], 2.0 / 9.0, epsilon = 1e-12);
+        assert_abs_diff_eq!(answer[1], 8.0 / 9.0, epsilon = 1e-12);
+        Ok(())
+    }
+
+    // Problem 1 from hmatrix-quadprogpp
+    #[test]
+    fn hmatrix_quadprogpp_problem1() -> Result<()> {
+        let offset: Array2<f64> = Array::eye(3) * 1e-12;
+        #[rustfmt::skip]
+        let g = array![
+            [      1.0, 2.0 / 3.0, 1.0 / 3.0],
+            [2.0 / 3.0, 2.0 / 3.0,       0.0],
+            [1.0 / 3.0,       0.0, 1.0 / 3.0],
+        ] + offset;
+        let g0 = array![-2.0, -4.0, 2.0];
+        let ce = array![[-3.0], [2.0], [1.0]];
+        let ce0 = array![0.0];
+        #[rustfmt::skip]
+        let ci = array![
+            [1.0,        0.0,        0.0],
+            [0.0,  1.0 / 3.0, -4.0 / 3.0],
+            [0.0, -1.0 / 3.0,  1.0 / 3.0]
+        ];
+        let ci0 = array![0.0, 0.0, 2.0];
+        let mut x = Vector::zeros(g.ncols());
+        let _best = solve_quadprog(
+            g,
+            g0,
+            ce,
+            ce0,
+            ci,
+            ci0,
+            &mut x
+        )?;
+        let answer = x;
+        assert_ulps_eq!(answer[0], 2.0 / 9.0, epsilon = 1e-5);
+        assert_abs_diff_eq!(answer[1], 10.0 / 9.0, epsilon = 1e-5);
+        assert_abs_diff_eq!(answer[2], -14.0 / 9.0, epsilon = 1e-5);
+        Ok(())
+    }
+
+}

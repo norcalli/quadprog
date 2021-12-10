@@ -1,5 +1,5 @@
 [package]
-name = "quadprog"
+name = "kquadprog"
 version = "0.1.0"
 authors = ["Ashkan Kiani <from-crates.quadprog@kiani.io>"]
 edition = "2018"
